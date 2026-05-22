@@ -1,0 +1,118 @@
+# ============================================================
+# LAMMPS script for oblique high-energy Al nanoparticle blast
+# collision onto FROZEN rectangular Al substrate
+# Full stress output + vivid von Mises colors in OVITO
+# CREATED BY Akshansh Mishra
+# Licensed under Creative Commons Attribution 4.0 International
+# ============================================================
+
+units           metal
+dimension       3
+atom_style      atomic
+boundary        p p s
+
+lattice         fcc 4.05
+
+# ---- Simulation box ----
+region          box block 0 120 0 120 0 130 units box
+create_box      1 box
+
+# ---- Substrate: frozen, 120 x 120 x 20 Å ----
+region          substrate block 0 120 0 120 0 20 units box
+create_atoms    1 region substrate
+
+# ---- NP1: radius 26 Å, left side ----
+region          np1 sphere 32 60 65 26 units box
+create_atoms    1 region np1
+
+# ---- NP2: radius 26 Å, right side ----
+region          np2 sphere 88 60 65 26 units box
+create_atoms    1 region np2
+
+mass            1 26.9815
+
+pair_style      eam/alloy
+pair_coeff      * * Al99.eam.alloy Al
+
+minimize        1.0e-4 1.0e-6 5000 50000
+
+# ---- Groups ----
+group           substrate    region substrate
+group           np1_atoms    region np1
+group           np2_atoms    region np2
+group           nps          union np1_atoms np2_atoms
+group           free         subtract all substrate
+
+# ---- Sanity check ----
+variable        n_np1 equal count(np1_atoms)
+variable        n_np2 equal count(np2_atoms)
+variable        n_sub equal count(substrate)
+print           "NP1 atoms: ${n_np1}"
+print           "NP2 atoms: ${n_np2}"
+print           "Substrate atoms: ${n_sub}"
+
+# ---- Velocities ----
+# Substrate fully frozen
+fix             1 substrate setforce 0.0 0.0 0.0
+velocity        substrate set 0.0 0.0 0.0
+
+# NPs: 25 Å/ps total speed, 30° from vertical
+# vx = 25*sin(30°) = +/-12.5 Å/ps
+# vz = -25*cos(30°) = -21.65 Å/ps
+velocity        np1_atoms set  12.5 0.0 -21.65 units box
+velocity        np2_atoms set -12.5 0.0 -21.65 units box
+
+# ---- Computes for stress ----
+compute         peratom_stress all stress/atom NULL
+compute         global_stress  all pressure thermo_temp
+compute         ke_atom all ke/atom
+compute         pe_atom all pe/atom
+
+# Von Mises stress normalized by Al atomic volume (16.6 Å³)
+# Result in GPa: substrate rest ≈ 0-1 GPa, impact zone ≈ 10-50 GPa
+variable        s11 atom c_peratom_stress[1]
+variable        s22 atom c_peratom_stress[2]
+variable        s33 atom c_peratom_stress[3]
+variable        s12 atom c_peratom_stress[4]
+variable        s13 atom c_peratom_stress[5]
+variable        s23 atom c_peratom_stress[6]
+variable        vonmises atom sqrt(0.5*((v_s11-v_s22)^2+(v_s22-v_s33)^2+(v_s33-v_s11)^2+6*(v_s12^2+v_s23^2+v_s13^2)))/166000
+
+# ---- Neighbour list ----
+neighbor        3.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+# ---- NPs: NVE (no thermostat = real blast) ----
+fix             2 nps nve
+
+timestep        0.0005
+
+# ---- Thermo ----
+thermo          100
+thermo_style    custom step temp ke pe etotal press atoms c_global_stress[1] c_global_stress[2] c_global_stress[3] c_global_stress[4] c_global_stress[5] c_global_stress[6]
+
+# ---- Single dump file with full stress ----
+dump            1 all custom 20 blast_frozen.lammpstrj id type x y z vx vy vz c_peratom_stress[1] c_peratom_stress[2] c_peratom_stress[3] c_peratom_stress[4] c_peratom_stress[5] c_peratom_stress[6] c_ke_atom c_pe_atom v_vonmises
+dump_modify     1 sort id
+
+# ---- Phase 1: approach (collision at ~step 160) ----
+run             100
+
+# ---- Phase 2: mid-air collision + blast (finest detail) ----
+dump_modify     1 every 5
+run             500
+
+# ---- Phase 3: post-blast travel toward substrate ----
+dump_modify     1 every 20
+run             2000
+
+# ---- Phase 4: substrate impact (finest detail) ----
+dump_modify     1 every 5
+run             500
+
+# ---- Phase 5: deposition + settling ----
+dump_modify     1 every 50
+run             5000
+
+# Total: 8100 steps = 4.05 ps
+write_data      blast_frozen_final.data
